@@ -9,12 +9,17 @@ browser = Browser('phantomjs')
 
 connect_re = re.compile(r'\((\w{3,4})\)')
 hour_min_re = re.compile(r'(\d{1,2}):(\d{2})\s*\((\d{1,2}-\w{3,4})\)')
+plus_days = re.compile(r'(\d{1,2}):(\d{2})\s*\+\s*(\d+) day')
+
+AIRPORTS = 'BOS YYC YVR YYZ YEG YUL YOW YHZ SFO LAX'.split()
 
 
 def main():
-    launch_search(sys.stdout, 'bos', 'yyr',
-                  datetime.date(2013, 7, 30),
-                  datetime.date(2013, 7, 31))
+    start_date = datetime.date(2013, 7, 30)
+    stop_date = datetime.date(2013, 7, 31)
+    for origin, dest in pairs(AIRPORTS):
+        launch_search(sys.stdout, origin, dest,
+                      start_date, stop_date)
 
 
 def launch_search(output, origin, dest, leave_date, return_date):
@@ -31,13 +36,9 @@ def launch_search(output, origin, dest, leave_date, return_date):
             date.strftime("%d/%m/%Y")
         ))
 
-    print 'heh'
-    
     browser.evaluate_script('document.getElementById("countryOfResidence").value = "US"')
 
     browser.find_by_css('.s_oC_4').click()
-
-    print 'here'
 
     csv_writer = csv.writer(output)
 
@@ -92,12 +93,23 @@ def gather_flight_data(browser, date, origin, dest, css_class):
                start.upper(), end.upper()]
 
 
+def pairs(input_list):
+    for i in range(len(input_list)):
+        for j in range(i):
+            yield input_list[i], input_list[j]
+
+
 def get_datetime(date, time):
     m = hour_min_re.search(time.strip())
+    m2 = plus_days.search(time.strip())
     if m:
         hour, minute = int(m.group(1)), int(m.group(2))
         date = datetime.datetime.strptime(m.group(3) + '-' + str(date.year),
                                           '%d-%b-%Y').date()
+    elif m2:
+        hour, minute = int(m2.group(1)), int(m2.group(2))
+        result = datetime.datetime.combine(date, datetime.time(hour, minute))
+        return result + datetime.timedelta(days=int(m2.group(3)))
     else:
         hour, minute = map(int, time.strip().split(':'))
         if hasattr(date, 'date'):
