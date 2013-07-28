@@ -7,22 +7,29 @@ from splinter import Browser
 
 browser = Browser('phantomjs')
 
-connect_re = re.compile(r'\((\w{3,4})\)')
-hour_min_re = re.compile(r'(\d{1,2}):(\d{2})\s*\((\d{1,2}-\w{3,4})\)')
-plus_days = re.compile(r'(\d{1,2}):(\d{2})\s*\+\s*(\d+) day')
-
+# Yalu: these are the parameters
 AIRPORTS = 'BOS YYC YVR YYZ YEG YUL YOW YHZ SFO LAX'.split()
+DATES = [datetime.date(2013, 8, 8), datetime.date(2013, 8, 9)]
 
 
 def main():
-    start_date = datetime.date(2013, 7, 30)
-    stop_date = datetime.date(2013, 7, 31)
-    for origin, dest in pairs(AIRPORTS):
-        launch_search(sys.stdout, origin, dest,
-                      start_date, stop_date)
+
+    csv_writer = csv.writer(sys.stdout)
+    csv_writer.writerow("FROM, TO, STOP1, STOP2, FLIGHT1, FLIGHT2, FLIGHT3, START TIME, STOP TIME, DURATION, PRICE, RECORDED TIME".split(", "))
+
+    for date in DATES:
+        for origin, dest in pairs(AIRPORTS):
+            try:
+                launch_search(sys.stdout, origin, dest, date)
+            except Exception, e:
+                if isinstance(e, KeyboardInterrupt):
+                    raise
+                raise
+                sys.stderr.write("Failed to run {0} -> {1}\n".format(origin, dest))
+                sys.stderr.flush()
 
 
-def launch_search(output, origin, dest, leave_date, return_date):
+def launch_search(output, origin, dest, leave_date, return_date=None):
     browser.visit('http://www.aircanada.com/en/home.html')
 
     browser.fill_form({
@@ -30,13 +37,16 @@ def launch_search(output, origin, dest, leave_date, return_date):
         'dest1': dest.upper()
     })
 
-    for i, date in enumerate((leave_date, return_date)):
+    for i, date in enumerate(filter(None, (leave_date, return_date))):
         browser.evaluate_script('document.getElementById("departure{0}").value="{1}"'.format(
             i + 1,
             date.strftime("%d/%m/%Y")
         ))
 
     browser.evaluate_script('document.getElementById("countryOfResidence").value = "US"')
+
+    if not return_date:
+        browser.evaluate_script('document.getElementById("tripType").value = "O"')
 
     browser.find_by_css('.s_oC_4').click()
 
@@ -45,8 +55,10 @@ def launch_search(output, origin, dest, leave_date, return_date):
     for row in gather_flight_data(browser, leave_date, origin, dest, 'flightList1'):
         csv_writer.writerow(map(to_str, row))
 
-    for row in gather_flight_data(browser, return_date, dest, origin, 'flightList2'):
-        csv_writer.writerow(map(to_str, row))
+    if return_date:
+        for row in gather_flight_data(browser, return_date, dest, origin, 'flightList2'):
+            csv_writer.writerow(map(to_str, row))
+
     return browser
 
 
@@ -55,12 +67,19 @@ def gather_flight_data(browser, date, origin, dest, css_class):
     rows = table.find_by_tag('tr')
     in_fare = False
     current = origin
+    fare_info = {'flights': []}
     for row in rows:
         if not row.visible:
+            if fare_info.get('flights'):
+                yield show_fare_info(fare_info)
+                fare_info = {'flights': []}
             in_fare = False
             current = origin
             continue
         if not (row.has_class('onMiddle') or row.has_class('offMiddle')):
+            if fare_info.get('flights'):
+                yield show_fare_info(fare_info)
+                fare_info = {'flights': []}
             in_fare = False
             continue
         cells = row.find_by_tag('td')
@@ -85,18 +104,72 @@ def gather_flight_data(browser, date, origin, dest, css_class):
                 duration = hour * 60 + minutes
             if row.find_by_css('.formattedCurrencyParent'):
                 price = row.find_by_css('.formattedCurrencyParent').text
-            yield ['', origin.upper(), dest.upper(), price,
-                   duration]
+            fare_info.update({
+                'origin': origin.upper(),
+                'dest': dest.upper(),
+                'price': price,
+                'duration': duration
+            })
 
-        yield [flight_name, '', '', '', '',
-               start_time, stop_time,
-               start.upper(), end.upper()]
+        fare_info.get('flights', []).append({
+            'flight': flight_name,
+            'start': start_time,
+            'stop': stop_time,
+            'start_airport': start.upper(),
+            'stop_airport': end.upper()
+        })
+
+    if fare_info.get('flights'):
+        yield show_fare_info(fare_info)
+
+
+def show_fare_info(fare_info):
+    """
+    Input:
+        {'dest': 'BOS',
+         'duration': 452,
+         'flights': [{'flight': u'AC110',
+                      'start': datetime.datetime(2013, 8, 8, 10, 15),
+                      'start_airport': 'YYC',
+                      'stop': datetime.datetime(2013, 8, 8, 16, 0),
+                      'stop_airport': u'YYZ'},
+                     {'flight': u'AC7388',
+                      'start': datetime.datetime(2013, 8, 8, 18, 15),
+                      'start_airport': u'YYZ',
+                      'stop': datetime.datetime(2013, 8, 8, 19, 47),
+                      'stop_airport': 'BOS'}],
+         'origin': 'YYC',
+         'price': u'$662'}
+    Output: [FROM, TO, STOP1, STOP2, FLIGHT1, FLIGHT2, FLIGHT3, START TIME, STOP TIME, DURATION, PRICE, RECORDED TIME]
+    """
+    if len(fare_info.get('flights')) > 3:
+        raise Exception("Fare has more than 3 flights: {0})".format(fare_info))
+
+    row = [fare_info['origin'], fare_info['dest']]
+    for flight in fare_info.get('flights')[:-1]:
+        row.append(flight['stop_airport'])
+
+    row.extend([''] * (3 - len(fare_info['flights'])))
+
+    for flight in fare_info['flights']:
+        row.append(flight['flight'])
+
+    row.extend([''] * (3 - len(fare_info['flights'])))
+
+    row.extend([fare_info['flights'][0]['start'],
+                fare_info['flights'][-1]['stop'],
+                fare_info['duration'],
+                fare_info['price'],
+                datetime.datetime.now()])
+
+    return row
 
 
 def pairs(input_list):
     for i in range(len(input_list)):
         for j in range(i):
             yield input_list[i], input_list[j]
+            yield input_list[j], input_list[i]
 
 
 def get_datetime(date, time):
@@ -130,6 +203,12 @@ def to_str(obj):
         return str(int(obj.seconds / 60))
     else:
         return str(obj)
+
+
+connect_re = re.compile(r'\((\w{3,4})\)')
+hour_min_re = re.compile(r'(\d{1,2}):(\d{2})\s*\((\d{1,2}-\w{3,4})\)')
+plus_days = re.compile(r'(\d{1,2}):(\d{2})\s*\+\s*(\d+) day')
+
 
 if __name__ == '__main__':
     main()
